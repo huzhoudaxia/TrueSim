@@ -156,8 +156,15 @@ class Packet:
 		self.routing_delay = 0
 		self.name = Packet.id
 		self.parent = parent
+		self.directionality = self.determine_directionality()
 		self.ready_to_send = False
 		Packet.id += 1
+
+	def determine_directionality(self):
+		directionality = "southbound" if self.dy < 0 else "northbound"
+		directionality = "eastbound" if self.dx > 0 else directionality
+		directionality = "westbound" if self.dx < 0 else directionality
+		return directionality
 
 class Hardware:
 	def __init__(self):
@@ -168,12 +175,16 @@ class Core(Hardware):
 
 	def __init__(self, north_line, east_line, west_line, south_line):
 		self.lines = [north_line, east_line, west_line, south_line]
-		self.default_routing_delay = 25
+		self.default_routing_delay = 2 # overhead of bundling and unbundling: page 1547
 		self.send_buffer = deque()	# used if cannot inject a packet to a transmission line
 		self.wait_buffer = deque()	# used to stall so that default routing delay ticks to 0
 		self.name = Core.id
 		self.packet_out_buffer = [None, None, None, None]
 		self.merge_delay = 2
+		self.forward_north_merge = None
+		self.forward_east_merge = None
+		self.forward_south_merge = None
+		self.forward_west_merge = None
 		Core.id += 1
 
 	def inject(self, packet):
@@ -181,7 +192,7 @@ class Core(Hardware):
 		packet.parent = self
 		self.wait_buffer.append(packet)
 
-	def prepare_out(self):
+	def route(self):
 		'''	Prepare a packet for sendoff, either taken directly from the send buffer, or taken
 			from the wait buffer (provided nothing's been queued in the send buffer)
 		'''
@@ -200,12 +211,67 @@ class Core(Hardware):
 				packet.routing_delay -= 1
 				new_wait_buffer.append(packet)
 			else:
-				print("Packet " + str(packet.name) + " is at core " + str(self.name) + " and must travel " + str(packet.dx) + " cores in the x and " + str(packet.dy) + " cores in the y")
-				blocked_packet = self.forward(packet)
-				if blocked_packet:
-					self.send_buffer.append(blocked_packet)
-
+				packet, is_outbound = self.advance(packet)	# send to next internal component
+				if is_outbound:
+					print("Packet " + str(packet.name) + " is at core " + str(self.name) + " and must travel " + str(packet.dx) + " cores in the x and " + str(packet.dy) + " cores in the y")
+					blocked_packet = self.forward(packet)
+					if blocked_packet:
+						self.send_buffer.append(blocked_packet)
+				else:
+					new_wait_buffer.append(packet)
 		self.wait_buffer = new_wait_buffer
+
+		self.clear_merges()
+
+	def advance(self, packet):
+		''' Responsible for forwarding a packet through a given routing subsystem
+		'''
+		is_outbound = False
+		if "exit" in packet.directionality:
+			return (packet, True)
+		packet.routing_delay = 6
+		if packet.directionality == 'eastbound':
+			if self.forward_east_merge == None:
+				self.forward_east_merge = packet
+				if packet.dx != 0:
+					packet.directionality = 'east-exit'
+				elif packet.dy > 0:
+					packet.directionality = 'east-north'
+				else:
+					packet.directionality = 'east-south'
+			else:
+				packet.routing_delay = 0	# unsuccessful routes can be immediately reattempted
+		elif packet.directionality == 'westbound':
+			if self.forward_west_merge == None:
+				self.forward_west_merge = packet
+				if packet.dx != 0:
+					packet.directionality = 'west-exit'
+				elif packet.dy > 0:
+					packet.directionality = 'west-north'
+				else:
+					packet.directionality = 'west-south'
+			else:
+				packet.routing_delay = 0
+		elif "south" in packet.directionality:	# accept both southbound packets and packets turning the corner
+			if self.forward_south_merge == None:
+				self.forward_south_merge = packet
+				packet.directionality = 'south-exit'
+			else:
+				packet.routing_delay = 0
+		elif "north" in packet.directionality:	# accept both northbound packets and packets turning the corner
+			if self.forward_north_merge == None:
+				self.forward_north_merge = packet
+				packet.directionality = 'north-exit'
+			else:
+				packet.routing_delay = 2	# overhead of exiting a core: page 1547
+		return (packet, is_outbound)
+
+	def clear_merges(self):
+		self.forward_north_merge = None
+		self.forward_east_merge = None
+		self.forward_south_merge = None
+		self.forward_west_merge = None
+
 
 	def send_out(self):
 		for x in range(0, 4):
@@ -221,6 +287,7 @@ class Core(Hardware):
 		if packet.dx > 0:	# send east
 			if not self.lines[1]:
 				print("Packet " + str(packet.name) + " was lost")
+				packet.parent = None
 				return None 	# destroy packets that attempt to go off the edge
 			if not self.lines[1].packet and not self.packet_out_buffer[1]:
 				self.packet_out_buffer[1] = packet
@@ -228,6 +295,7 @@ class Core(Hardware):
 		elif packet.dx < 0:	# send west
 			if not self.lines[2]:
 				print("Packet " + str(packet.name) + " was lost")
+				packet.parent = None
 				return None 	# destroy packets that attempt to go off the edge
 			if not self.lines[2].packet and not self.packet_out_buffer[2]:
 				self.packet_out_buffer[2] = packet
@@ -235,6 +303,7 @@ class Core(Hardware):
 		elif packet.dy > 0:	# send north
 			if not self.lines[0]:
 				print("Packet " + str(packet.name) + " was lost")
+				packet.parent = None
 				return None 	# destroy packets that attempt to go off the edge
 			if not self.lines[0].packet and not self.packet_out_buffer[0]:
 				self.packet_out_buffer[0] = packet
@@ -242,6 +311,7 @@ class Core(Hardware):
 		elif packet.dy < 0: # send south
 			if not self.lines[3]:
 				print("Packet " + str(packet.name) + " was lost")
+				packet.parent = None
 				return None 	# destroy packets that attempt to go off the edge
 			if not self.lines[3].packet and not self.packet_out_buffer[3]:
 				self.packet_out_buffer[3] = packet
@@ -249,6 +319,7 @@ class Core(Hardware):
 		else:
 			# Destroy packet
 			print("Packet " + str(packet.name) + " has reached its destination")
+			packet.parent = None
 			return None
 		return packet
 
@@ -314,28 +385,38 @@ def simulate(packets, timesteps):
 		otherwise, for a given core c, whether a wire w is cleared before a
 		new packet is injected into w is a function of when c is to_visit.
 	'''
-	for packet in packets:
-		if isInstance(packet.parent, Line):
-			packet.routing_delay = max(0, packet.routing_delay - 1)
-	to_visit = []
-	for packet in packets:
-		if isInstance(packet.parent, Line) and packet.routing_delay == 0:
-			packet.parent.dissassociate()
-			if packet.dx > 0:
-				packet.parent.component_2.inject(packet)
-			elif packet.dx < 0:
-				packet.parent.component_1.inject(packet)
-			elif packet.dy > 0:
-				packet.parent.component_1.inject(packet)
-			elif packet.dy < 0:
-				packet.parent.component_2.inject(packet)
-		if isInstance(packet.parent, Core) and packet.parent_component not in to_visit:
-			to_visit.append(packet.parent)
-	for core in to_visit:
-		core.prepare_out()
-	random.shuffle(to_visit)
-	for core in to_visit:
-		core.send_out()
+	for t in range(0, timesteps):
+		print(t)
+		for packet in packets:
+			if isinstance(packet.parent, Line):
+				packet.routing_delay = max(0, packet.routing_delay - 1)
+		to_visit = []
+		for packet in packets:
+			if isinstance(packet.parent, Line) and packet.routing_delay == 0:
+				packet.parent.dissassociate()
+				if packet.dx > 0 and packet.parent.component_2:
+					packet.dx -= 1
+					packet.directionality = 'eastbound'
+					packet.parent.component_2.inject(packet)
+				elif packet.dx < 0 and packet.parent.component_1:
+					packet.dx += 1
+					packet.directionality = 'westbound'
+					packet.parent.component_1.inject(packet)
+				elif packet.dy > 0 and packet.parent.component_1:
+					packet.dy -= 1
+					packet.directionality = 'northbound'
+					packet.parent.component_1.inject(packet)
+				elif packet.dy < 0 and packet.parent.component_2:
+					packet.dy += 1
+					packet.directionality = 'southbound'
+					packet.parent.component_2.inject(packet)
+			if isinstance(packet.parent, Core) and packet.parent not in to_visit:
+				to_visit.append(packet.parent)
+		for core in to_visit:
+			core.route()
+		random.shuffle(to_visit)
+		for core in to_visit:
+			core.send_out()
 
 
 core_array = []
@@ -355,8 +436,8 @@ for y in range(0, size):
 for x in range(0, size - 1):
 	for y in range(0, size - 1):
 		# all lines now "know" connected cores
-		core_array[x][y].lines[1].connect(core_array[x][y], core_array[x + 1][y])
-		core_array[x][y].lines[3].connect(core_array[x][y], core_array[x][y + 1])
+		core_array[x][y].lines[1].connect(core_array[x][y], core_array[x][y + 1]) # east --> next column over
+		core_array[x][y].lines[3].connect(core_array[x][y], core_array[x + 1][y]) # south --> next row over
 
  # These packets intersect at core 1, 1 and neither gets delayed because their routing pipelines do not overlap
 packets = []
@@ -379,7 +460,10 @@ packets.append(Packet(core_array[4][10], 0, 3))
 packets.append(Packet(core_array[10][9], 1, -5))
 packets.append(Packet(core_array[9][10], 0, -5))
 
+ # This packet travels off-grid and is lost
+packets.append(Packet(core_array[0][10], 0, 5))
+
 for packet in packets:
 	packet.parent.inject(packet)
 
-simulate(packets, 200)
+simulate(packets, 90)
