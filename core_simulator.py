@@ -213,12 +213,12 @@ N_CHANNELS = 1
 
 class Packet:
 	id = 1
+	delays = 0
 
 	def __init__(self, parent, dx, dy, dz = 0):
 		self.dx = dx
 		self.dy = dy
 		self.dz = dz
-		self.delays = 0	# metrics
 		self.routing_delay = 0
 		self.name = Packet.id
 		self.parent = parent
@@ -280,8 +280,8 @@ class Core(Hardware):
 	id = 1
 
 	def __init__(self, n1, n2, e1, e2, w1, w2, s1, s2, u1 = None, u2 = None, d1 = None, d2 = None):
-		self.lines_in = [n1, e1, w1, s1] if u1 == None else [n1, e1, w1, s1, u1, d1]
-		self.lines_out = [n2, e2, w2, s2] if u2 == None else [n2, e2, w2, s2, u2, d2]
+		self.lines_in = [n1, e1, w1, s1, u1, d1]
+		self.lines_out = [n2, e2, w2, s2, u2, d2]
 		self.default_routing_delay = 2 # overhead of bundling and unbundling: page 1547
 		self.send_buffer = deque()	# used if cannot inject a packet to a transmission line
 		self.wait_buffer = deque()	# used to stall so that default routing delay ticks to 0
@@ -324,10 +324,10 @@ class Core(Hardware):
 			else:
 				packet, is_outbound = self.advance(packet)	# send to next internal component
 				if is_outbound:
-					print("Packet " + str(packet.name) + " is at core " + str(self.name) + " and must travel " + str(packet.dx) + " cores in the x and " + str(packet.dy) + " cores in the y")
+					#print("Packet " + str(packet.name) + " is at core " + str(self.name) + " and dx = " + str(packet.dx) + ", dy = " + str(packet.dy) + ", dz = " + str(packet.dz))
 					blocked_packet = self.forward(packet)
 					if blocked_packet:
-						blocked_packet.delays += 1
+						Packet.delays += 1
 						self.send_buffer.append(blocked_packet)
 				else:
 					new_wait_buffer.append(packet)
@@ -348,62 +348,66 @@ class Core(Hardware):
 				if packet.dx != 0:
 					packet.directionality = 'east-exit'
 				elif packet.dy > 0:
-					packet.directionality = 'east-north'
+					packet.directionality = 'north'
 				else:
-					packet.directionality = 'east-south'
+					packet.directionality = 'south'	# route exits and up/downs through forward-south
 			else:
 				packet.routing_delay = 0	# unsuccessful routes can be immediately reattempted
-				packet.delays += 1
+				Packet.delays += 1
 		elif packet.directionality == 'westbound':
 			if self.forward_west_merge == None:
 				self.forward_west_merge = packet
 				if packet.dx != 0:
 					packet.directionality = 'west-exit'
 				elif packet.dy > 0:
-					packet.directionality = 'west-north'
+					packet.directionality = 'north'
 				else:
-					packet.directionality = 'west-south'
+					packet.directionality = 'south'
 			else:
 				packet.routing_delay = 0
-				packet.delays += 1
+				Packet.delays += 1
 		elif "south" in packet.directionality:	# accept both southbound packets and packets turning the corner
 			if self.forward_south_merge == None:
 				self.forward_south_merge = packet
-				if packet.dz == 0:
+				if packet.dy != 0:
 					packet.directionality = 'south-exit'
 				elif packet.dz > 0:
-					packet.directionality = 'south-up'
+					packet.directionality = 'up'
+				elif packet.dz < 0:
+					packet.directionality = 'down'
 				else:
-					packet.directionality = 'south-down'
+					packet.directionality = 'self-exit'
 			else:
 				packet.routing_delay = 0
-				packet.delays += 1
+				Packet.delays += 1
 		elif "north" in packet.directionality:	# accept both northbound packets and packets turning the corner
 			if self.forward_north_merge == None:
 				self.forward_north_merge = packet
-				if packet.dz == 0:
+				if packet.dy != 0:
 					packet.directionality = 'north-exit'
 				elif packet.dz > 0:
-					packet.directionality = 'north-up'
+					packet.directionality = 'up'
+				elif packet.dz < 0:
+					packet.directionality = 'down'
 				else:
-					packet.directionality = 'north-down'
+					packet.directionality = 'self-exit'
 			else:
 				packet.routing_delay = 0
-				packet.delays += 1
+				Packet.delays += 1
 		elif "up" in packet.directionality:	# accept both southbound packets and packets turning the corner
 			if self.forward_up_merge == None:
 				self.forward_up_merge = packet
 				packet.directionality = 'up-exit'
 			else:
 				packet.routing_delay = 0
-				packet.delays += 1
+				Packet.delays += 1
 		elif "down" in packet.directionality:	# accept both northbound packets and packets turning the corner
 			if self.forward_down_merge == None:
 				self.forward_down_merge = packet
 				packet.directionality = 'down-exit'
 			else:
 				packet.routing_delay = 0
-				packet.delays += 1
+				Packet.delays += 1
 		return (packet, is_outbound)
 
 	def clear_merges(self):
@@ -421,7 +425,7 @@ class Core(Hardware):
 				for packet in packets:
 					blocked_packet = self.lines_out[x].inject(packet)
 					if blocked_packet != None:	# add packet back in if it was blocked
-						blocked_packet.delays += 1
+						Packet.delays += 1
 						self.packet_out_buffer[x].add(blocked_packet)
 
 	def forward(self, packet):
@@ -461,6 +465,14 @@ class Core(Hardware):
 				self.packet_out_buffer[3].add(packet)
 				return None
 		elif packet.dz > 0:	# send up
+			if not self.lines_out[4]:
+				print("Packet " + str(packet.name) + " was lost")
+				packet.parent = None
+				return None 	# destroy packets that attempt to go off the edge
+			if self.lines_out[4].is_clear() and self.packet_out_buffer[4].is_clear():
+				self.packet_out_buffer[4].add(packet)
+				return None
+		elif packet.dz < 0: # send down
 			if not self.lines_out[5]:
 				print("Packet " + str(packet.name) + " was lost")
 				packet.parent = None
@@ -468,17 +480,9 @@ class Core(Hardware):
 			if self.lines_out[5].is_clear() and self.packet_out_buffer[5].is_clear():
 				self.packet_out_buffer[5].add(packet)
 				return None
-		elif packet.dz < 0: # send down
-			if not self.lines_out[6]:
-				print("Packet " + str(packet.name) + " was lost")
-				packet.parent = None
-				return None 	# destroy packets that attempt to go off the edge
-			if self.lines_out[6].is_clear() and self.packet_out_buffer[6].is_clear():
-				self.packet_out_buffer[6].add(packet)
-				return None
 		else:
 			# Destroy packet
-			print("Packet " + str(packet.name) + " has reached its destination")
+			#print("Packet " + str(packet.name) + " has reached its destination")
 			packet.parent = None
 			return None
 		return packet
@@ -493,8 +497,8 @@ class Line(Hardware):
 		self.default_routing_delay = 1 # 1 timesteps to move a packet across a wire
 		self.name = Line.id
 		Line.id += 1
-		self.component_1 = None
-		self.component_2 = None
+		self.component_in = None
+		self.component_out = None
 		self.channels = [None for x in range(0, N_CHANNELS)]
 
 	def is_clear(self):
@@ -529,7 +533,7 @@ class Line(Hardware):
 			if channel == packet:
 				channel = None
 
-def simulate(workload, timesteps, probability, width, topology):
+def simulate(workload, timesteps, probability, width, topology, topology_type, mean_distance):
 	'''	Make each component perform its duty per timestamp
 		for each packet:
 			decrement delay by one time unit
@@ -565,11 +569,18 @@ def simulate(workload, timesteps, probability, width, topology):
 		new packet is injected into w is a function of when c is to_visit.
 	'''
 	packets = []
-	if workload == "toy":
+	distance = 0
+	if workload == "toy" and topology_type == 'mesh':
 		packets = toy_run(topology)
-		print(topology)
+	elif workload == "toy" and topology_type == '3Dmesh':
+		packets = toy_run3D(topology)
 	for t in range(0, timesteps):
-		print(t)
+		if t % 10 == 0:
+			print(t)
+		if workload == 'random':
+			new_packets, new_distance = random_firestorm(topology, topology_type, probability, width, mean_distance)	# add in new batch of packets
+			packets += new_packets
+			distance += new_distance
 		for packet in packets:
 			if isinstance(packet.parent, Line):
 				packet.routing_delay = max(0, packet.routing_delay - 1)
@@ -595,7 +606,8 @@ def simulate(workload, timesteps, probability, width, topology):
 				elif packet.dz < 0 and packet.parent.component_out:
 					packet.dz += 1
 					packet.directionality = 'downbound'
-				packet.parent.component_out.inject(packet)
+				if packet.parent.component_out:
+					packet.parent.component_out.inject(packet)
 			if isinstance(packet.parent, Core) and packet.parent not in to_visit:
 				to_visit.append(packet.parent)
 		for core in to_visit:
@@ -603,6 +615,7 @@ def simulate(workload, timesteps, probability, width, topology):
 		random.shuffle(to_visit)
 		for core in to_visit:
 			core.send_out()
+	print("total distance traveled: " + str(distance))
 
 def construct_mesh(n_cores):
 	width = round(n_cores ** (1 / 2))
@@ -640,19 +653,20 @@ def construct_3D_mesh(n_cores):
 				east = [Line(), Line()] if y < width - 1 else [None, None]
 				west = [None, None] if y == 0 else [mesh[x][y - 1][z].lines_out[1], mesh[x][y - 1][z].lines_in[1]]
 				down = [Line(), Line()] if z < width - 1 else [None, None]
-				up = [None, None] if z == 0 else [mesh[x][y][z - 1].lines_out[1], mesh[x][y][z - 1].lines_in[1]]
+				up = [None, None] if z == 0 else [mesh[x][y][z - 1].lines_out[5], mesh[x][y][z - 1].lines_in[5]]
 				mesh[x][y][z] = (Core(north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1], up[0], up[1], down[0], down[1]))
 
-	for x in range(0, width - 1):
-		for y in range(0, width - 1):
+	for x in range(0, width):
+		for y in range(0, width):
 			for z in range(0, width - 1):
 				# all lines now "know" connected cores
-				mesh[x][y][z].lines_out[1].connect(mesh[x][y][z], mesh[x][y + 1][z]) # east --> next column over
-				mesh[x][y][z].lines_in[1].connect(mesh[x][y + 1][z], mesh[x][y][z]) # east --> next column over
-				mesh[x][y][z].lines_out[3].connect(mesh[x][y][z], mesh[x + 1][y][z]) # south --> next row over
-				mesh[x][y][z].lines_in[3].connect(mesh[x + 1][y][z], mesh[x][y][z]) # south --> next row over
-				mesh[x][y][z].lines_out[6].connect(mesh[x][y][z], mesh[x][y][z + 1]) # down --> core here feeds down one level
-				mesh[x][y][z].lines_in[6].connect(mesh[x][y][z + 1], mesh[x][y][z]) # down --> core down one level feeds in
+				if x < width - 1 and y < width - 1:
+					mesh[x][y][z].lines_out[1].connect(mesh[x][y][z], mesh[x][y + 1][z]) # east --> next column over
+					mesh[x][y][z].lines_in[1].connect(mesh[x][y + 1][z], mesh[x][y][z]) # east --> next column over
+					mesh[x][y][z].lines_out[3].connect(mesh[x][y][z], mesh[x + 1][y][z]) # south --> next row over
+					mesh[x][y][z].lines_in[3].connect(mesh[x + 1][y][z], mesh[x][y][z]) # south --> next row over
+				mesh[x][y][z].lines_out[5].connect(mesh[x][y][z], mesh[x][y][z + 1]) # down --> core here feeds down one level
+				mesh[x][y][z].lines_in[5].connect(mesh[x][y][z + 1], mesh[x][y][z]) # down --> core down one level feeds in
 	return mesh
 
 def toy_run(core_array):
@@ -688,15 +702,78 @@ def toy_run(core_array):
 def toy_run3D(mesh):
 	 # These packets intersect at core 1, 1 and neither gets delayed because their routing pipelines do not overlap
 	packets = []
-	packets.append(Packet(core_array[0][1][0], 0, -5, -5))
-	packets.append(Packet(core_array[1][0][0], 4, 1, -5))
+	#packets.append(Packet(mesh[0][1][0], 0, -5, -5))
+	#packets.append(Packet(mesh[1][0][0], 4, 0, -5))
+
+	packets.append(Packet(mesh[15][15][0], 0, 0, -5))
+	print(mesh[15][15][0].lines_out[5].component_out)
+	print(mesh[14][14][0].lines_out[5].component_out)
+
+	print(mesh[15][15][0].lines_in[5].component_out)
+	print(mesh[14][14][0].lines_in[5].component_out)
 
 	for packet in packets:
 		packet.parent.inject(packet)
 	return packets
 
-def random_firestorm(prob, mean_distance):
-	pass
+def random_firestorm(topology, topology_type, probability, width, mean_distance):
+	''' Generate packets for each neuron with p = probability and address them
+		to valid cores such that, on average, the mean_distance value roughly
+		approximates mean distance traveled by each packet in each direction
+	'''
+	packets = []
+	total_distance = 0
+	if topology_type == '3Dmesh':
+		for x in range(0, width):
+			for y in range(0, width):
+				for z in range(0, width):
+					for n in range(0, 256):
+						r_val = random.random()
+						if r_val < probability:
+							min_x = max(0, -mean_distance * 2 + y) - y
+							max_x = min(width - 1, y + (mean_distance * 2)) - y
+							max_y = min(width - 1, mean_distance * 2 + x) - x
+							min_y = max(0, x - (mean_distance * 2)) - x
+							min_z = max(-(width - 1 - z), -mean_distance * 2)
+							max_z = min(mean_distance * 2, z)
+							x_val = random.randint(min_x, max_x)
+							y_val = random.randint(-max_y, -min_y)
+							z_val = random.randint(min_z, max_z)
+							packet = Packet(topology[x][y][z], x_val, y_val, z_val)
+							packets.append(packet)
+							#print(packet.name, ":", x, y, z, min_z, max_z, width, x_val, y_val, z_val)
+							total_distance += abs(x_val)
+							total_distance += abs(y_val)
+							total_distance += abs(z_val)
+	elif topology_type == 'mesh':
+		for x in range(0, width):
+			for y in range(0, width):
+				for n in range(0, 256):
+					r_val = random.random()
+					if r_val < probability:
+						min_x = max(0, -mean_distance * 2 + y) - y
+						max_x = min(width - 1, y + (mean_distance * 2)) - y
+						max_y = min(width - 1, mean_distance * 2 + x) - x
+						min_y = max(0, x - (mean_distance * 2)) - x
+						x_val = random.randint(min_x, max_x)
+						y_val = random.randint(-max_y, -min_y)
+						packet = Packet(topology[x][y], x_val, y_val)
+						packets.append(packet)
+						#packet = Packet(topology[x][y], random.randint(-mean_distance * 2, mean_distance * 2), random.randint(-mean_distance * 2, mean_distance * 2))
+						#packets.append(packet)
+						total_distance += abs(x_val)
+						total_distance += abs(y_val)
+
+	for packet in packets:
+		packet.parent.inject(packet)
+	return (packets, total_distance)
+
+def quasi_SNN_firestorm(topology, topology_type, probability, width):
+	''' Generate spikes from a given neuron with p = probability and address it
+		to a core so as to mimic a SNN's true function.
+		Map
+	'''
+	
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Simulate the TrueNorth chip.')
@@ -704,13 +781,15 @@ if __name__ == "__main__":
 	parser.add_argument('--workload', dest='workload', default='toy')
 	parser.add_argument('--n_cores', type=int, dest='n_cores', default=4096)
 	parser.add_argument('--t', type=int, dest='time', default=100)
-	parser.add_argument('--prob', type=float, dest='probability', default=0.001)
+	parser.add_argument('--distance', type=int, dest='mean_distance', default=1)	# gives distance an average packet will have to travel in each direction
+	parser.add_argument('--probability', type=float, dest='probability', default=0.0001)	# gives probability that a given neuron will fire in random workload
 	args = parser.parse_args()
 	topology_type = args.topology_type
 	workload = args.workload
 	n_cores = args.n_cores
 	time = args.time
 	probability = args.probability
+	mean_distance = args.mean_distance
 	topology = None
 	width = None
 	if topology_type == "mesh":
@@ -719,7 +798,8 @@ if __name__ == "__main__":
 	elif topology_type == "3Dmesh":
 		topology = construct_3D_mesh(n_cores)
 		width = round(n_cores ** (1 / 3))
-	simulate(workload, time, probability, width, topology)
+	simulate(workload, time, probability, width, topology, topology_type, mean_distance)
+	print("Total number of packet delays: " + str(Packet.delays))
 
 
 
