@@ -4,6 +4,66 @@
 	Simulator bandwidth was updated to more accurately reflect bandwidth
 	in silico, and wires between nodes are now unidirectional.
 
+	The simulator was altered so as to support both 2D and 3D modeling.
+	Each core now consists of six sets of wires, each of which corresponding
+	to one of North, East, South, West, Up, and Down.
+
+	The simulator also allows tracks basic metrics. These values include total
+	packet traveling distance and the number of instances in which a packet
+	was delayed by congestion.
+
+	Simulation can be conducted under both toy and dynamic policies. In the
+	former case, packets are statically allocated at t = 0 and allowed to
+	propagate throughout the network. In the latter case, packets are created
+	dynamically, as dictated by the policy, and introduced to the network
+	as they are created.
+
+	A policy that calls for random packet spawning was implemented as a basic
+	synthetic workload. While this schema poorly approximates actual conditions
+	in the TrueNorth chip, it nonetheless provides some key first-order insights. First,
+	the 3D mesh topology results in significantly fewer delays as traffic
+	increases.
+
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology mesh --t 100 --probability .00001 --distance 9
+	total distance traveled: 18746
+	Total number of packet delays: 9
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology 3Dmesh --t 100 --probability .00001 --distance 9
+	total distance traveled: 17045
+	Total number of packet delays: 8
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology mesh --t 100 --probability .0001 --distance 9
+	total distance traveled: 178791
+	Total number of packet delays: 613
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology 3Dmesh --t 100 --probability .0001 --distance 9
+	total distance traveled: 167491
+	Total number of packet delays: 563
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology mesh --t 100 --probability .001 --distance 9
+	total distance traveled: 1803917
+	Total number of packet delays: 347175
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 4096 --workload random --topology 3Dmesh --t 100 --probability .001 --distance 9
+	total distance traveled: 1668246
+	Total number of packet delays: 258480
+
+	Second, while increasing the average distance between addressing and addressed
+	neuron does, perhaps unsurprisingly, increase the number of delays, this metric
+	does not affect one topology more than the other.
+
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 16384 --workload random --topology mesh --t 100 --probability .0001 --distance 5
+	total distance traveled: 431630
+	Total number of packet delays: 2260
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 16384 --workload random --topology 3Dmesh --t 100 --probability .0001 --distance 5
+	total distance traveled: 571727
+	Total number of packet delays: 2128
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 16384 --workload random --topology mesh --t 100 --probability .0001 --distance 14
+	total distance traveled: 1134745
+	Total number of packet delays: 2850
+	RobBrunstad:Project robbrunstad$ pypy3 core_simulator.py --n_cores 16384 --workload random --topology 3Dmesh --t 100 --probability .0001 --distance 14
+	total distance traveled: 998063
+	Total number of packet delays: 2597
+
+	In faithful workload, same number of stale packets across topologies implies
+	the existence of hotspots, which could be solved by optimization of neuron
+	mapping, as was done in TrueNorth
+
 	12/14/19
 
 	In this update, we see the introduction of centiticks and channels—-a
@@ -210,12 +270,19 @@ import random
 import argparse
 
 N_CHANNELS = 1
+packetlist = []
+activated_neurons = {}
+#propagated_activity = {}
 
 class Packet:
 	id = 1
 	delays = 0
 
 	def __init__(self, parent, dx, dy, dz = 0):
+		'''	dx: + means go right (increase y value)
+			dy: + means go north (decerase x value)
+			dz: + means go down (decrease z value)
+		'''
 		self.dx = dx
 		self.dy = dy
 		self.dz = dz
@@ -224,6 +291,8 @@ class Packet:
 		self.parent = parent
 		self.directionality = self.determine_directionality()
 		self.ready_to_send = False
+		self.alive_for = 0
+		self.target = None
 		Packet.id += 1
 
 	def determine_directionality(self):
@@ -235,6 +304,52 @@ class Packet:
 		directionality = "eastbound" if self.dx > 0 else directionality
 		directionality = "westbound" if self.dx < 0 else directionality
 		return directionality
+
+	def give_target_neuron(self, target):
+		self.target = target
+
+class Neuron:
+	def __init__(self, probability, layer, core):
+		self.probability = probability
+		self.layer = layer
+		self.core = core
+		self.target = None
+		self.wavelength = random.randint(100, 200)	# 500 to 1000 Hz
+		self.spike_count = 0
+		self.spike_max = random.randint(10, 20)
+		self.is_spiking = False
+
+	def add_target(self, target_neuron):
+		self.target = target_neuron
+
+	def spike(self):
+		self.is_spiking = True
+
+	def is_generating_packet(self, ctick):
+		if self.is_spiking and ctick % self.wavelength == 0:
+			self.spike_count += 1
+			packet = self.generate_packet()
+			if self.spike_count > self.spike_max:
+				self.reset()
+			return packet
+		return None
+
+	def reset(self):
+		self.spike_count = 0
+		self.is_spiking = False
+
+	def generate_packet(self):
+		#global propagated_activity
+		#if propagated_activity.get(self):
+		#	print("Neuron in layer " + str(self.layer) + " has spiked")
+		if self.target:
+			dx = self.target.core.y - self.core.y
+			dy = self.core.x - self.target.core.x
+			dz = -(self.target.core.z - self.core.z)
+			packet = Packet(self.core, dx, dy, dz)
+			#print(packet.name, self.core.x, self.core.y, self.core.z, dx, dy, dz)
+			return packet
+		return None
 
 class Hardware:
 	def __init__(self):
@@ -279,7 +394,7 @@ class Buffer:
 class Core(Hardware):
 	id = 1
 
-	def __init__(self, n1, n2, e1, e2, w1, w2, s1, s2, u1 = None, u2 = None, d1 = None, d2 = None):
+	def __init__(self, x, y, z, n1, n2, e1, e2, w1, w2, s1, s2, u1 = None, u2 = None, d1 = None, d2 = None):
 		self.lines_in = [n1, e1, w1, s1, u1, d1]
 		self.lines_out = [n2, e2, w2, s2, u2, d2]
 		self.default_routing_delay = 2 # overhead of bundling and unbundling: page 1547
@@ -293,12 +408,19 @@ class Core(Hardware):
 		self.forward_west_merge = None
 		self.forward_up_merge = None
 		self.forward_down_merge = None
+		self.neurons = []
+		self.x = x
+		self.y = y
+		self.z = z
 		Core.id += 1
 
 	def inject(self, packet):
 		packet.routing_delay = self.default_routing_delay
 		packet.parent = self
 		self.wait_buffer.append(packet)
+
+	def append_neuron(self, neuron):
+		self.neurons.append(neuron)
 
 	def route(self):
 		'''	Prepare a packet for sendoff, either taken directly from the send buffer, or taken
@@ -483,9 +605,22 @@ class Core(Hardware):
 		else:
 			# Destroy packet
 			#print("Packet " + str(packet.name) + " has reached its destination")
+			#print(packet.target)
+			self.propagate_spike(packet.target)
 			packet.parent = None
 			return None
 		return packet
+
+	def propagate_spike(self, target_neuron):
+		global packetlist
+		global activated_neurons
+		if target_neuron:	# packet made it to the right destination! (Only active under faithful workload)
+			random_val = random.random()
+			if random_val < target_neuron.probability * 5:	# downstream neurons have greater probability of triggering a firing event
+				target_neuron.spike()
+				activated_neurons[target_neuron] = True
+				#propagated_activity[target_neuron] = True
+				#print(len(activated_neurons))
 
 class Line(Hardware):
 	''' Bandwidth.
@@ -533,7 +668,7 @@ class Line(Hardware):
 			if channel == packet:
 				channel = None
 
-def simulate(workload, timesteps, probability, width, topology, topology_type, mean_distance):
+def simulate(workload, timesteps, probability, width, topology, topology_type, mean_distance, n_layers, n_neurons):
 	'''	Make each component perform its duty per timestamp
 		for each packet:
 			decrement delay by one time unit
@@ -568,24 +703,39 @@ def simulate(workload, timesteps, probability, width, topology, topology_type, m
 		otherwise, for a given core c, whether a wire w is cleared before a
 		new packet is injected into w is a function of when c is to_visit.
 	'''
-	packets = []
+	global packetlist
 	distance = 0
+	stale_packets = {}
+	input_neurons = []
+
 	if workload == "toy" and topology_type == 'mesh':
-		packets = toy_run(topology)
+		packetlist = toy_run(topology)
 	elif workload == "toy" and topology_type == '3Dmesh':
-		packets = toy_run3D(topology)
+		packetlist = toy_run3D(topology)
+	if workload == "faithful":
+		input_neurons = init_quasi_SNN_firestorm(topology, probability, n_layers, n_neurons)
 	for t in range(0, timesteps):
-		if t % 10 == 0:
-			print(t)
+		#if t % 10 == 0:
+			#print(t)
+
+		# two dynamic workloads update packetlist here
 		if workload == 'random':
 			new_packets, new_distance = random_firestorm(topology, topology_type, probability, width, mean_distance)	# add in new batch of packets
-			packets += new_packets
+			packetlist += new_packets
 			distance += new_distance
-		for packet in packets:
+		elif workload == 'faithful':
+			new_packets, new_distance = quasi_SNN_firestorm(input_neurons, t)
+			packetlist += new_packets
+			distance += new_distance
+
+		for packet in packetlist:
+			packet.alive_for += 1
+			if packet.alive_for > 1500:
+				stale_packets[packet.name] = True
 			if isinstance(packet.parent, Line):
 				packet.routing_delay = max(0, packet.routing_delay - 1)
 		to_visit = []
-		for packet in packets:
+		for packet in packetlist:
 			if isinstance(packet.parent, Line) and packet.routing_delay == 0:
 				packet.parent.dissassociate(packet)
 				if packet.dx > 0 and packet.parent.component_out:
@@ -615,7 +765,8 @@ def simulate(workload, timesteps, probability, width, topology, topology_type, m
 		random.shuffle(to_visit)
 		for core in to_visit:
 			core.send_out()
-	print("total distance traveled: " + str(distance))
+	print("Total distance traveled: " + str(distance))
+	print("Total number of stale packets: " + str(len(stale_packets)))
 
 def construct_mesh(n_cores):
 	width = round(n_cores ** (1 / 2))
@@ -630,7 +781,7 @@ def construct_mesh(n_cores):
 			north = [None, None] if x == 0 else [core_array[x - 1][y].lines_out[3], core_array[x - 1][y].lines_in[3]]
 			east = [Line(), Line()] if y < width - 1 else [None, None]
 			west = [None, None] if y == 0 else [core_array[x][y - 1].lines_out[1], core_array[x][y - 1].lines_in[1]]
-			core_array[x][y] = (Core(north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1]))
+			core_array[x][y] = (Core(x, y, 0, north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1]))
 
 	for x in range(0, width - 1):
 		for y in range(0, width - 1):
@@ -654,7 +805,7 @@ def construct_3D_mesh(n_cores):
 				west = [None, None] if y == 0 else [mesh[x][y - 1][z].lines_out[1], mesh[x][y - 1][z].lines_in[1]]
 				down = [Line(), Line()] if z < width - 1 else [None, None]
 				up = [None, None] if z == 0 else [mesh[x][y][z - 1].lines_out[5], mesh[x][y][z - 1].lines_in[5]]
-				mesh[x][y][z] = (Core(north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1], up[0], up[1], down[0], down[1]))
+				mesh[x][y][z] = (Core(x, y, z, north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1], up[0], up[1], down[0], down[1]))
 
 	for x in range(0, width):
 		for y in range(0, width):
@@ -768,12 +919,62 @@ def random_firestorm(topology, topology_type, probability, width, mean_distance)
 		packet.parent.inject(packet)
 	return (packets, total_distance)
 
-def quasi_SNN_firestorm(topology, topology_type, probability, width):
+def init_quasi_SNN_firestorm(topology, probability, n_layers, n_neurons):
 	''' Generate spikes from a given neuron with p = probability and address it
 		to a core so as to mimic a SNN's true function.
-		Map
+		How it's done:
+			for each neuron:
+				randomly map neuron to a core
+					(this avoids heavy congestion issues)
+				randomly map neuron to a layer
+			for each layer:
+				randomly map each neuron to a neuron in an immediately adjacent
+				downstream layer
 	'''
-	
+	layer_to_neuron = {}
+	for n in range(0, n_neurons):
+		layer_id = random.randint(1, n_layers)
+		core = topology
+		while not isinstance(core, Core):
+			core = random.choice(core)
+		neuron = Neuron(probability, layer_id, core)
+		core.append_neuron(neuron)
+		if layer_to_neuron.get(layer_id):
+			layer_to_neuron[layer_id].append(neuron)
+		else:
+			layer_to_neuron[layer_id] = [neuron]
+	n_keys = len(layer_to_neuron.keys())
+	for layer in range(1, n_keys + 1):
+		target_layer = layer + 1
+		while not layer_to_neuron.get(target_layer):
+			target_layer += 1
+			if target_layer > n_layers:
+				break
+		if not layer_to_neuron.get(target_layer):
+			break
+		for neuron in layer_to_neuron[layer]:
+			target = random.choice(layer_to_neuron[target_layer])
+			neuron.add_target(target)
+	return layer_to_neuron[1]	# return the first layer of neurons, used to initiate spiking
+
+def quasi_SNN_firestorm(input_neurons, ctick):
+	''' Initiate new firing chains by sending off packets from the input layer
+	'''
+	packets = []
+	global activated_neurons
+	for neuron in input_neurons:
+		if random.random() < neuron.probability:
+			neuron.spike()
+			activated_neurons[neuron] = True
+	for neuron in activated_neurons:
+		new_packet = neuron.is_generating_packet(ctick)
+		if new_packet:
+			new_packet.give_target_neuron(neuron.target)
+			packets.append(new_packet)
+
+	for packet in packets:
+		packet.parent.inject(packet)
+	return (packets, 0)
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Simulate the TrueNorth chip.')
@@ -781,6 +982,8 @@ if __name__ == "__main__":
 	parser.add_argument('--workload', dest='workload', default='toy')
 	parser.add_argument('--n_cores', type=int, dest='n_cores', default=4096)
 	parser.add_argument('--t', type=int, dest='time', default=100)
+	parser.add_argument('--n_neurons', type=int, dest='n_neurons', default=10000)
+	parser.add_argument('--n_layers', type=int, dest='n_layers', default=4)
 	parser.add_argument('--distance', type=int, dest='mean_distance', default=1)	# gives distance an average packet will have to travel in each direction
 	parser.add_argument('--probability', type=float, dest='probability', default=0.0001)	# gives probability that a given neuron will fire in random workload
 	args = parser.parse_args()
@@ -790,6 +993,8 @@ if __name__ == "__main__":
 	time = args.time
 	probability = args.probability
 	mean_distance = args.mean_distance
+	n_layers = args.n_layers
+	n_neurons = args.n_neurons
 	topology = None
 	width = None
 	if topology_type == "mesh":
@@ -798,7 +1003,7 @@ if __name__ == "__main__":
 	elif topology_type == "3Dmesh":
 		topology = construct_3D_mesh(n_cores)
 		width = round(n_cores ** (1 / 3))
-	simulate(workload, time, probability, width, topology, topology_type, mean_distance)
+	simulate(workload, time, probability, width, topology, topology_type, mean_distance, n_layers, n_neurons)
 	print("Total number of packet delays: " + str(Packet.delays))
 
 
