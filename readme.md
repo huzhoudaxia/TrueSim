@@ -3,6 +3,7 @@ TrueSim, a TrueNorth Routing Simulator
 Please see TrueSim.pdf for background, motivation, and results.
 
 General parameters:
+
 	--n_cores: number of cores in the network
 	--workload: type of packet-generating policy
 	--topology: type of network to simulate
