@@ -8,9 +8,10 @@
 	Each core now consists of six sets of wires, each of which corresponding
 	to one of North, East, South, West, Up, and Down.
 
-	The simulator also allows tracks basic metrics. These values include total
-	packet traveling distance and the number of instances in which a packet
-	was delayed by congestion.
+	The simulator also allows tracking of basic metrics. These values include total
+	packet traveling distance, the number of instances in which a packet
+	was delayed by congestion, and the number of stale packets--that is, the
+	number of packets that missed their 15-tick deadline
 
 	Simulation can be conducted under both toy and dynamic policies. In the
 	former case, packets are statically allocated at t = 0 and allowed to
@@ -109,11 +110,13 @@
 				append packet.parent_component to to_visit
 		for each core in to_visit:
 				for each packet in the send buffer:
-					add to directional packet_out register if register is empty
-							else return to send buffer
+					if packet has been sent through each subsystem:
+						add to directional packet_out register if register is empty
+								else return to send buffer
 				for each packet in the wait buffer:
-					add to directional packet_out register if register is empty
-							else send to send buffer
+					if packet has been sent through each subsystem:
+						add to directional packet_out register if register is empty
+								else send to send buffer
 		for each core in to_visit, selected randomly:
 			for each packet in the packet_out_buffer:
 				offload packet to corresponding wire
@@ -554,6 +557,7 @@ class Core(Hardware):
 		''' Adds packets to the appropriate directional output if possible
 			Returns packets that it cannot route at the present time
 		'''
+		#print("forwarding packet #" + str(packet.name))
 		if packet.dx > 0:	# send east
 			if not self.lines_out[1]:
 				print("Packet " + str(packet.name) + " was lost")
@@ -608,6 +612,7 @@ class Core(Hardware):
 			#print(packet.target)
 			self.propagate_spike(packet.target)
 			packet.parent = None
+			packetlist.remove(packet)
 			return None
 		return packet
 
@@ -783,13 +788,15 @@ def construct_mesh(n_cores):
 			west = [None, None] if y == 0 else [core_array[x][y - 1].lines_out[1], core_array[x][y - 1].lines_in[1]]
 			core_array[x][y] = (Core(x, y, 0, north[0], north[1], east[0], east[1], west[0], west[1], south[0], south[1]))
 
-	for x in range(0, width - 1):
-		for y in range(0, width - 1):
+	for x in range(0, width):
+		for y in range(0, width):
 			# all lines now "know" connected cores
-			core_array[x][y].lines_out[1].connect(core_array[x][y], core_array[x][y + 1]) # east --> next column over
-			core_array[x][y].lines_in[1].connect(core_array[x][y + 1], core_array[x][y]) # east --> next column over
-			core_array[x][y].lines_out[3].connect(core_array[x][y], core_array[x + 1][y]) # south --> next row over
-			core_array[x][y].lines_in[3].connect(core_array[x + 1][y], core_array[x][y]) # south --> next row over
+			if y + 1 < width:
+				core_array[x][y].lines_out[1].connect(core_array[x][y], core_array[x][y + 1]) # east --> next column over
+				core_array[x][y].lines_in[1].connect(core_array[x][y + 1], core_array[x][y]) # east --> next column over
+			if x + 1 < width:
+				core_array[x][y].lines_out[3].connect(core_array[x][y], core_array[x + 1][y]) # south --> next row over
+				core_array[x][y].lines_in[3].connect(core_array[x + 1][y], core_array[x][y]) # south --> next row over
 	return core_array
 
 def construct_3D_mesh(n_cores):
@@ -809,15 +816,17 @@ def construct_3D_mesh(n_cores):
 
 	for x in range(0, width):
 		for y in range(0, width):
-			for z in range(0, width - 1):
+			for z in range(0, width):
 				# all lines now "know" connected cores
-				if x < width - 1 and y < width - 1:
+				if y + 1 < width:
 					mesh[x][y][z].lines_out[1].connect(mesh[x][y][z], mesh[x][y + 1][z]) # east --> next column over
 					mesh[x][y][z].lines_in[1].connect(mesh[x][y + 1][z], mesh[x][y][z]) # east --> next column over
+				if x + 1 < width:
 					mesh[x][y][z].lines_out[3].connect(mesh[x][y][z], mesh[x + 1][y][z]) # south --> next row over
 					mesh[x][y][z].lines_in[3].connect(mesh[x + 1][y][z], mesh[x][y][z]) # south --> next row over
-				mesh[x][y][z].lines_out[5].connect(mesh[x][y][z], mesh[x][y][z + 1]) # down --> core here feeds down one level
-				mesh[x][y][z].lines_in[5].connect(mesh[x][y][z + 1], mesh[x][y][z]) # down --> core down one level feeds in
+				if z + 1 < width:
+					mesh[x][y][z].lines_out[5].connect(mesh[x][y][z], mesh[x][y][z + 1]) # down --> core here feeds down one level
+					mesh[x][y][z].lines_in[5].connect(mesh[x][y][z + 1], mesh[x][y][z]) # down --> core down one level feeds in
 	return mesh
 
 def toy_run(core_array):
@@ -856,12 +865,7 @@ def toy_run3D(mesh):
 	#packets.append(Packet(mesh[0][1][0], 0, -5, -5))
 	#packets.append(Packet(mesh[1][0][0], 4, 0, -5))
 
-	packets.append(Packet(mesh[15][15][0], 0, 0, -5))
-	print(mesh[15][15][0].lines_out[5].component_out)
-	print(mesh[14][14][0].lines_out[5].component_out)
-
-	print(mesh[15][15][0].lines_in[5].component_out)
-	print(mesh[14][14][0].lines_in[5].component_out)
+	packets.append(Packet(mesh[5][5][5], random.randint(-3, 4), random.randint(-3, 4), random.randint(-3, 4)))
 
 	for packet in packets:
 		packet.parent.inject(packet)
@@ -972,9 +976,13 @@ def quasi_SNN_firestorm(input_neurons, ctick):
 			new_packet.give_target_neuron(neuron.target)
 			packets.append(new_packet)
 
+	total_distance = 0
 	for packet in packets:
+		total_distance += abs(packet.dx)
+		total_distance += abs(packet.dy)
+		total_distance += abs(packet.dz)
 		packet.parent.inject(packet)
-	return (packets, 0)
+	return (packets, total_distance)
 
 if __name__ == "__main__":
 	parser = argparse.ArgumentParser(description='Simulate the TrueNorth chip.')
