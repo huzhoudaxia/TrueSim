@@ -8,6 +8,7 @@ General parameters:
 	--topology: type of network to simulate
 
 Available workloads:
+	
 	"toy"
 		-a small set of packets are statically allocated at timestep 0 and allowed to propagate throughout the network
 	"random"
@@ -23,6 +24,7 @@ Available workloads:
 			--n_layers: number of layers in the network
 
 Available topologies:
+
 	"mesh"
 		-the default 2D mesh network that is included in the real chip
 	"3Dmesh"
